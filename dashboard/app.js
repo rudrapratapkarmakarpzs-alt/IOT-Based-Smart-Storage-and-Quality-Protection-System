@@ -195,6 +195,11 @@ const I18N = {
     lblCtrlGh: 'GitHub Internet Sync',
     ctrlIp: 'ESP32-S3 Local AP IP Address',
     connectEsp: 'Connect',
+    lblStorageStartDate: 'Stored In Container On:',
+    btnDateToday: 'Today',
+    lblDaysInStorage: 'Days in Storage',
+    offlineTitle: 'ESP32-S3 Offline',
+    offlineSub: 'Showing last recorded sensor data from',
     footerText: 'Designed for tribal families, Van Dhan Vikas Kendras (VDVK), and rural grain aggregators to stop fungal decay, eliminate post-harvest distress sales, and preserve fair market value for forest produce.'
   },
   hi: {
@@ -242,6 +247,11 @@ const I18N = {
     lblCtrlGh: 'गिटहब इंटरनेट सिंक',
     ctrlIp: 'ईएसपी३२ लोकल एपी आईपी पता',
     connectEsp: 'कनेक्ट करें',
+    lblStorageStartDate: 'भंडारण प्रारंभ तिथि:',
+    btnDateToday: 'आज',
+    lblDaysInStorage: 'भंडारण के दिन',
+    offlineTitle: 'ईएसपी३२-एस३ ऑफलाइन',
+    offlineSub: 'अंतिम दर्ज सेंसर डेटा समय',
     footerText: 'जनजातीय परिवारों, वन धन विकास केंद्रों और ग्रामीण भंडारण हेतु विशेष निर्मित ताकि उपज की सड़न रुके, संकटकालीन बिक्री से मुक्ति मिले और उपज का पूरा मूल्य मिले।'
   }
 };
@@ -265,6 +275,10 @@ const state = {
   serialPort: null,
   serialReader: null,
   connectionType: 'searching', // 'wifi', 'usb', 'cloud', 'searching'
+  isOnline: false,
+  lastOnlineTime: localStorage.getItem('esp32_last_online') || null,
+  lastKnownTelemetry: JSON.parse(localStorage.getItem('esp32_last_telemetry') || 'null'),
+  missedPolls: 0,
   historyData: []
 };
 
@@ -457,16 +471,86 @@ function renderProduceCards() {
   });
 }
 
+// Helper: Container Storage Starting Date Manager
+function getTodayDateString() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getStorageStartDate(produceId) {
+  let stored = localStorage.getItem('storage_start_' + produceId);
+  if (!stored) {
+    const p = PRODUCE_DATABASE[produceId] || PRODUCE_DATABASE.mahua;
+    const defaultDays = p.defaultDays || 12;
+    const d = new Date();
+    d.setDate(d.getDate() - defaultDays);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    stored = `${year}-${month}-${day}`;
+    localStorage.setItem('storage_start_' + produceId, stored);
+  }
+  return stored;
+}
+
+function calculateDaysFromStartDate(startDateStr) {
+  if (!startDateStr) return 0;
+  const start = new Date(startDateStr + 'T00:00:00');
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const diffMs = now.getTime() - start.getTime();
+  return Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+}
+
+function formatDateLabel(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function onStorageDateChange(newDateStr) {
+  if (!newDateStr) return;
+  localStorage.setItem('storage_start_' + state.selectedProduceId, newDateStr);
+  const days = calculateDaysFromStartDate(newDateStr);
+  state.storageDays = days;
+
+  // Sync range slider
+  const sD = document.getElementById('slider-days');
+  if (sD) sD.value = days;
+
+  updateDashboard();
+
+  // Send update to ESP32
+  fetch(`http://${state.espIp}/api/set-produce?produce=${state.selectedProduceId}&days=${days}`, { cache: 'no-store' })
+    .catch(() => {});
+  sendSerialCommand(`SET_DAYS:${days}\n`);
+}
+
+function setStorageDateToday() {
+  const today = getTodayDateString();
+  const dateInput = document.getElementById('input-storage-start-date');
+  if (dateInput) dateInput.value = today;
+  onStorageDateChange(today);
+}
+
 function selectProduce(key) {
   state.selectedProduceId = key;
   state.userSelectedProduce = true; // Lock user's selection: incoming telemetry won't override this!
-  const p = PRODUCE_DATABASE[key];
-  if (p) {
-    // If user selects new produce, update default storage days
-    state.storageDays = p.defaultDays;
-    const sliderDays = document.getElementById('slider-days');
-    if (sliderDays) sliderDays.value = p.defaultDays;
-  }
+
+  // Retrieve stored start date for this crop
+  const startDate = getStorageStartDate(key);
+  const dateInput = document.getElementById('input-storage-start-date');
+  if (dateInput) dateInput.value = startDate;
+
+  // Calculate actual elapsed days
+  state.storageDays = calculateDaysFromStartDate(startDate);
+  const sliderDays = document.getElementById('slider-days');
+  if (sliderDays) sliderDays.value = state.storageDays;
+
   renderProduceCards();
   updateDashboard();
 
@@ -543,7 +627,15 @@ function updateDashboard() {
 
   const recPeriod = document.getElementById('rec-period');
   if (recPeriod) {
-    recPeriod.textContent = isHi ? `${state.storageDays} दिन` : `${state.storageDays} days`;
+    const startDate = getStorageStartDate(state.selectedProduceId);
+    recPeriod.textContent = isHi 
+      ? `${state.storageDays} दिन (${formatDateLabel(startDate)} से)` 
+      : `${state.storageDays} days (Since ${formatDateLabel(startDate)})`;
+  }
+
+  const storageAgeDaysEl = document.getElementById('storage-age-days');
+  if (storageAgeDaysEl) {
+    storageAgeDaysEl.textContent = state.storageDays;
   }
 
   const recPeriodStatus = document.getElementById('rec-period-status');
@@ -621,6 +713,14 @@ function updateDashboard() {
     gaugePeriodVal.innerHTML = `${state.storageDays}<span class="gauge-unit">${isHi ? 'दिन' : 'days'}</span>`;
   }
 
+  const gaugePeriodSub = document.getElementById('gauge-period-sub');
+  if (gaugePeriodSub) {
+    const startDate = getStorageStartDate(state.selectedProduceId);
+    gaugePeriodSub.textContent = isHi
+      ? `प्रारंभ: ${formatDateLabel(startDate)}`
+      : `Batch Started: ${formatDateLabel(startDate)}`;
+  }
+
   // D. Sliders Readout Update
   const valCtrlTemp = document.getElementById('val-ctrl-temp');
   if (valCtrlTemp) valCtrlTemp.textContent = `${state.temperature.toFixed(1)} °C`;
@@ -643,15 +743,25 @@ function onSensorSliderChange() {
 
   if (sliderTemp) state.temperature = parseFloat(sliderTemp.value);
   if (sliderHum) state.humidity = parseFloat(sliderHum.value);
-  if (sliderDays) state.storageDays = parseInt(sliderDays.value, 10);
+  if (sliderDays) {
+    state.storageDays = parseInt(sliderDays.value, 10);
+    // Adjust start date backwards based on slider
+    const d = new Date();
+    d.setDate(d.getDate() - state.storageDays);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const adjustedDate = `${year}-${month}-${day}`;
+    localStorage.setItem('storage_start_' + state.selectedProduceId, adjustedDate);
+    const dateInput = document.getElementById('input-storage-start-date');
+    if (dateInput) dateInput.value = adjustedDate;
+  }
 
   updateDashboard();
 
-  // If in live mode, send updated parameters to ESP32
-  if (state.connectionMode === 'live') {
-    fetch(`http://${state.espIp}/api/set-produce?temp=${state.temperature}&humidity=${state.humidity}&days=${state.storageDays}`)
-      .catch(e => console.warn('ESP32 update error', e));
-  }
+  // Send updated parameters to ESP32
+  fetch(`http://${state.espIp}/api/set-produce?temp=${state.temperature}&humidity=${state.humidity}&days=${state.storageDays}`, { cache: 'no-store' })
+    .catch(() => {});
 }
 
 // 8. Scenario Presets
@@ -783,6 +893,10 @@ function setLanguage(lang) {
     { id: 'lbl-ctrl-gh', key: 'lblCtrlGh' },
     { id: 'lbl-ctrl-ip', key: 'ctrlIp' },
     { id: 'btn-connect-esp', key: 'connectEsp' },
+    { id: 'lbl-storage-start-date', key: 'lblStorageStartDate' },
+    { id: 'btn-date-today', key: 'btnDateToday' },
+    { id: 'lbl-days-in-storage', key: 'lblDaysInStorage' },
+    { id: 'txt-offline-title', key: 'offlineTitle' },
     { id: 'txt-footer-text', key: 'footerText' }
   ];
 
@@ -799,78 +913,120 @@ function setLanguage(lang) {
 
 // 11. Real-Time ESP32 Synchronization & Telemetry Engine
 
+// Helper to format last online timestamp nicely
+function formatLastSeenTime(isoStr) {
+  if (!isoStr) return state.currentLanguage === 'hi' ? 'कोई पुराना रिकॉर्ड नहीं' : 'Never connected';
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return isoStr;
+  
+  const now = new Date();
+  const diffSec = Math.floor((now - d) / 1000);
+  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const dateStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+  if (diffSec < 60) {
+    return state.currentLanguage === 'hi' ? `अभी-अभी (${timeStr})` : `Just now (${timeStr})`;
+  } else if (diffSec < 3600) {
+    const mins = Math.floor(diffSec / 60);
+    return state.currentLanguage === 'hi' ? `${mins} मिनट पहले (${timeStr})` : `${mins} min ago (${timeStr})`;
+  } else if (diffSec < 86400 && d.getDate() === now.getDate()) {
+    return state.currentLanguage === 'hi' ? `आज ${timeStr}` : `Today at ${timeStr}`;
+  } else {
+    return `${dateStr}, ${timeStr}`;
+  }
+}
+
+// Update Top Navbar Connection Badge, Health Pill, and Offline Banner
+function updateOnlineOfflineUI(isOnline, source = 'wifi') {
+  const badge = document.getElementById('connection-badge');
+  const dot = document.getElementById('nav-sync-dot');
+  const txt = document.getElementById('txt-sync-status');
+  const healthPill = document.getElementById('sensor-health-pill');
+  const healthDot = document.getElementById('sensor-health-dot');
+  const healthTxt = document.getElementById('txt-sensor-status');
+  const banner = document.getElementById('offline-telemetry-banner');
+  const lastSeenEl = document.getElementById('val-last-seen-time');
+  const pingStatus = document.getElementById('esp-ping-status');
+
+  const isHi = (state.currentLanguage === 'hi');
+
+  if (isOnline) {
+    state.isOnline = true;
+    if (badge) {
+      badge.className = `connection-badge ${source === 'usb' ? 'connected-usb' : ''}`;
+    }
+    if (dot) {
+      dot.className = `indicator-dot ${source === 'usb' ? 'dot-usb' : 'dot-live'}`;
+    }
+    if (txt) {
+      txt.textContent = source === 'usb' 
+        ? (isHi ? 'ईएसपी३२ ऑनलाइन (USB)' : 'ESP32 Online (USB)')
+        : (isHi ? `ईएसपी३२ ऑनलाइन (${state.espIp})` : `ESP32 Online (${state.espIp})`);
+    }
+    if (healthPill) healthPill.className = 'sensor-health';
+    if (healthDot) healthDot.className = 'dot-online';
+    if (healthTxt) {
+      healthTxt.textContent = source === 'usb'
+        ? (isHi ? 'ईएसपी३२-एस३ ऑनलाइन (USB)' : 'ESP32-S3 Online (USB)')
+        : (isHi ? 'ईएसपी३२-एस३ ऑनलाइन' : 'ESP32-S3 Online');
+    }
+    if (banner) banner.style.display = 'none';
+    if (pingStatus) {
+      pingStatus.textContent = source === 'usb' ? 'Connected (USB 115200)' : `Connected (${state.espIp})`;
+      pingStatus.style.color = '#10b981';
+    }
+  } else {
+    // Offline
+    state.isOnline = false;
+    if (badge) badge.className = 'connection-badge offline';
+    if (dot) dot.className = 'indicator-dot dot-offline';
+    if (txt) {
+      txt.textContent = isHi ? 'ईएसपी३२ ऑफलाइन' : 'ESP32 Offline';
+    }
+    if (healthPill) healthPill.className = 'sensor-health offline';
+    if (healthDot) healthDot.className = 'dot-online';
+    if (healthTxt) {
+      healthTxt.textContent = isHi ? 'ईएसपी३२-एस३ ऑफलाइन' : 'ESP32-S3 Offline';
+    }
+    if (banner) {
+      banner.style.display = 'flex';
+      if (lastSeenEl) {
+        lastSeenEl.textContent = formatLastSeenTime(state.lastOnlineTime);
+      }
+    }
+    if (pingStatus) {
+      const timeStr = formatLastSeenTime(state.lastOnlineTime);
+      pingStatus.textContent = isHi 
+        ? `ऑफलाइन (अंतिम सक्रिय: ${timeStr})`
+        : `Offline (Last online: ${timeStr})`;
+      pingStatus.style.color = '#ef4444';
+    }
+  }
+}
+
 // Central Telemetry Dispatcher: updates sensors & evaluates AI without overwriting user's selected produce
 function applyIncomingTelemetry(data, source = 'wifi') {
+  state.isOnline = true;
+  state.missedPolls = 0;
+  state.lastOnlineTime = new Date().toISOString();
+  state.lastKnownTelemetry = { ...data, receivedAt: state.lastOnlineTime };
+  localStorage.setItem('esp32_last_online', state.lastOnlineTime);
+  localStorage.setItem('esp32_last_telemetry', JSON.stringify(state.lastKnownTelemetry));
+
   if (data.temperature !== undefined) state.temperature = Number(data.temperature);
   if (data.humidity !== undefined) state.humidity = Number(data.humidity);
   if (data.pressure !== undefined) state.pressure = Number(data.pressure);
-  if (data.storageDays !== undefined && !state.userSelectedProduce) {
-    state.storageDays = Number(data.storageDays);
-  }
-
-  // Only initialize produce from hardware if user hasn't explicitly clicked one
-  if (data.produceId && !state.userSelectedProduce) {
-    state.selectedProduceId = data.produceId;
-  }
 
   // Sync range slider inputs to real readings
   const sT = document.getElementById('slider-temp');
   const sH = document.getElementById('slider-hum');
-  const sD = document.getElementById('slider-days');
   if (sT) sT.value = state.temperature;
   if (sH) sH.value = state.humidity;
-  if (sD) sD.value = state.storageDays;
 
-  updateConnectionBadge(source, true);
+  updateOnlineOfflineUI(true, source);
 
   renderProduceCards();
   updateDashboard();
-}
-
-// Update Top Navbar Connection Badge and Control Status
-function updateConnectionBadge(type, isConnected, extraText = '') {
-  const badge = document.getElementById('connection-badge');
-  const dot = document.getElementById('nav-sync-dot');
-  const txt = document.getElementById('txt-sync-status');
-  const pingStatus = document.getElementById('esp-ping-status');
-  const sensorStatus = document.getElementById('txt-sensor-status');
-
-  if (!badge || !dot || !txt) return;
-
-  badge.className = 'connection-badge';
-
-  if (type === 'usb' && isConnected) {
-    badge.classList.add('connected-usb');
-    dot.className = 'indicator-dot dot-usb';
-    txt.textContent = 'ESP32 Live (USB)';
-    if (pingStatus) pingStatus.textContent = 'USB Serial Connected (115200)';
-    if (sensorStatus) {
-      sensorStatus.textContent = 'ESP32-S3 Hardware Online (USB)';
-      sensorStatus.style.color = '#38bdf8';
-    }
-  } else if (type === 'wifi' && isConnected) {
-    dot.className = 'indicator-dot dot-live';
-    txt.textContent = `ESP32 Live (${state.espIp})`;
-    if (pingStatus) pingStatus.textContent = `Wi-Fi Connected (${state.espIp})`;
-    if (sensorStatus) {
-      sensorStatus.textContent = `ESP32-S3 Hardware Online (${state.espIp})`;
-      sensorStatus.style.color = '#10b981';
-    }
-  } else if (type === 'cloud' && isConnected) {
-    badge.classList.add('connected-cloud');
-    dot.className = 'indicator-dot dot-cloud';
-    txt.textContent = 'Cloud Synced';
-    if (pingStatus) pingStatus.textContent = 'GitHub Telemetry Synced';
-    if (sensorStatus) {
-      sensorStatus.textContent = 'GitHub Cloud Synced';
-      sensorStatus.style.color = '#a855f7';
-    }
-  } else {
-    badge.classList.add('searching');
-    dot.className = 'indicator-dot dot-searching';
-    txt.textContent = isConnected ? 'ESP32 Active' : (extraText || 'Searching ESP32...');
-    if (pingStatus && !isConnected) pingStatus.textContent = extraText || 'Searching ESP32...';
-  }
 }
 
 // Direct Wi-Fi / SoftAP Polling
@@ -901,7 +1057,6 @@ function pollEsp32Status() {
   // If USB is actively connected, skip HTTP polling to avoid conflict
   if (state.serialPort) return;
 
-  const pingStatus = document.getElementById('esp-ping-status');
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
 
@@ -916,14 +1071,10 @@ function pollEsp32Status() {
     })
     .catch(err => {
       clearTimeout(timeoutId);
-      if (window.location.protocol === 'https:') {
-        // Modern browsers block http:// from https:// (Mixed Content)
-        if (pingStatus) {
-          pingStatus.textContent = 'HTTPS blocks local IP — use "Connect USB Cable" or open dashboard locally';
-        }
-        updateConnectionBadge('searching', false, 'Use USB or Local');
-      } else {
-        if (pingStatus) pingStatus.textContent = `ESP32 at ${state.espIp} unreachable`;
+      state.missedPolls++;
+      // If 2 polls fail consecutively, switch UI to offline
+      if (state.missedPolls >= 2) {
+        updateOnlineOfflineUI(false, 'wifi');
       }
     });
 }
@@ -1195,6 +1346,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // Attempt initial cloud sync fetch
     pollGithubTelemetry(false);
   }
+
+  // Initialize produce start date picker
+  const startDate = getStorageStartDate(state.selectedProduceId);
+  const dateInput = document.getElementById('input-storage-start-date');
+  if (dateInput) dateInput.value = startDate;
+  state.storageDays = calculateDaysFromStartDate(startDate);
+
+  // If cached telemetry exists from previous session, display it
+  if (state.lastKnownTelemetry) {
+    if (state.lastKnownTelemetry.temperature !== undefined) state.temperature = Number(state.lastKnownTelemetry.temperature);
+    if (state.lastKnownTelemetry.humidity !== undefined) state.humidity = Number(state.lastKnownTelemetry.humidity);
+    if (state.lastKnownTelemetry.pressure !== undefined) state.pressure = Number(state.lastKnownTelemetry.pressure);
+  }
+
+  // Display initial status (offline until first heartbeat)
+  updateOnlineOfflineUI(false, 'offline');
 
   initHistoryData();
   renderProduceCards();

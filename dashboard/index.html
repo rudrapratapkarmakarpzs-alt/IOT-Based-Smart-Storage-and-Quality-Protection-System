@@ -121,7 +121,22 @@
               <p class="card-subtitle" id="txt-record-subtitle">Active batch status inside storage container</p>
             </div>
           </div>
-          <div class="batch-badge" id="batch-id-badge">Batch #TRB-2026-04</div>
+        </div>
+
+        <!-- Storage Inflow & Batch Starting Date Bar -->
+        <div class="storage-date-bar">
+          <div class="date-input-group">
+            <span class="date-icon">📅</span>
+            <label for="input-storage-start-date" id="lbl-storage-start-date">Stored In Container On:</label>
+            <div class="date-picker-wrapper">
+              <input type="date" id="input-storage-start-date" onchange="onStorageDateChange(this.value)" title="Select the date this produce was placed into storage">
+              <button type="button" class="date-quick-btn" onclick="setStorageDateToday()" id="btn-date-today" title="Set storage date to today">Today</button>
+            </div>
+          </div>
+          <div class="storage-duration-pill" id="storage-duration-pill">
+            <span class="storage-days-count" id="storage-age-days">12</span>
+            <span class="storage-days-label" id="lbl-days-in-storage">Days in Storage</span>
+          </div>
         </div>
 
         <!-- Official Required Record Table -->
@@ -217,8 +232,17 @@
             </div>
           </div>
           <div class="sensor-health" id="sensor-health-pill">
-            <span class="dot-online"></span>
+            <span class="dot-online" id="sensor-health-dot"></span>
             <span id="txt-sensor-status">ESP32-S3 Online</span>
+          </div>
+        </div>
+
+        <!-- Offline / Last Seen Notification Banner -->
+        <div class="offline-telemetry-banner" id="offline-telemetry-banner" style="display: none;">
+          <span class="offline-icon">⚠️</span>
+          <div class="offline-banner-content">
+            <strong id="txt-offline-title">ESP32-S3 Offline</strong> &bull;
+            <span id="txt-offline-sub">Showing last recorded sensor data from <span id="val-last-seen-time">Unknown</span></span>
           </div>
         </div>
 
