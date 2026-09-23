@@ -1,0 +1,25 @@
+# Arduino & PlatformIO build artifacts
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.hex
+*.elf
+build/
+Output/
+
+# Sensitive credentials & secrets
+config_secrets.h
+secrets.h
+
+# Editor and OS caches
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+
+# Temporary scratch logs
+*.log
