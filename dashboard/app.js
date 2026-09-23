@@ -249,18 +249,22 @@ const I18N = {
 // 3. Application State
 const state = {
   currentLanguage: 'en',
-  connectionMode: 'demo', // 'demo', 'github', or 'live'
   espIp: '192.168.4.1',
   githubUser: 'rudrapratapkarmakarpzs-alt',
   githubRepo: 'IOT-Based-Smart-Storage-and-Quality-Protection-System',
   githubBranch: 'main',
   githubPath: 'data/telemetry.json',
   selectedProduceId: 'mahua',
+  userSelectedProduce: false, // Flag to keep user's crop choice locked
   temperature: 28.4,
   humidity: 64.0,
+  pressure: 1013.2,
   storageDays: 12,
   livePollingTimer: null,
   githubPollingTimer: null,
+  serialPort: null,
+  serialReader: null,
+  connectionType: 'searching', // 'wifi', 'usb', 'cloud', 'searching'
   historyData: []
 };
 
@@ -455,6 +459,7 @@ function renderProduceCards() {
 
 function selectProduce(key) {
   state.selectedProduceId = key;
+  state.userSelectedProduce = true; // Lock user's selection: incoming telemetry won't override this!
   const p = PRODUCE_DATABASE[key];
   if (p) {
     // If user selects new produce, update default storage days
@@ -465,11 +470,12 @@ function selectProduce(key) {
   renderProduceCards();
   updateDashboard();
 
-  // If in Live Mode, push update to ESP32
-  if (state.connectionMode === 'live') {
-    fetch(`http://${state.espIp}/api/set-produce?produce=${key}&days=${state.storageDays}`)
-      .catch(e => console.warn('ESP32 push failed', e));
-  }
+  // Push produce change to ESP32 via HTTP API
+  fetch(`http://${state.espIp}/api/set-produce?produce=${key}&days=${state.storageDays}`, { cache: 'no-store' })
+    .catch(e => console.log('HTTP produce push notice:', e.message));
+
+  // Push produce change to ESP32 via WebSerial USB if connected
+  sendSerialCommand(`SET_PRODUCE:${key}\nSET_DAYS:${state.storageDays}\n`);
 }
 
 // 6. Update Dashboard View
@@ -543,7 +549,7 @@ function updateDashboard() {
   const recPeriodStatus = document.getElementById('rec-period-status');
   if (recPeriodStatus) {
     const isOver = state.storageDays > p.safeDaysMax;
-    recPeriodStatus.textContent = isOver 
+    recPeriodStatus.textContent = isOver
       ? (isHi ? 'पलटने/निरीक्षण की आवश्यकता' : 'Turnover recommended')
       : (isHi ? 'सुरक्षित सीमा में' : 'Within safe turnover');
     recPeriodStatus.style.color = isOver ? '#f59e0b' : '#a7f3d0';
@@ -605,7 +611,7 @@ function updateDashboard() {
 
   const gaugeDewSub = document.getElementById('gauge-dew-sub');
   if (gaugeDewSub) {
-    gaugeDewSub.textContent = isHi 
+    gaugeDewSub.textContent = isHi
       ? `तापमान अंतर: ${evalResult.dewGap}°C`
       : `Ambient Gap: ${evalResult.dewGap}°C`;
   }
@@ -791,122 +797,87 @@ function setLanguage(lang) {
   updateDashboard();
 }
 
-// 11. Mode Switcher (Demo vs GitHub Cloud vs ESP32 Live AP)
-function setConnectionMode(mode) {
-  state.connectionMode = mode;
-  const btnDemo = document.getElementById('btn-mode-demo');
-  const btnGithub = document.getElementById('btn-mode-github');
-  const btnLive = document.getElementById('btn-mode-live');
-  const ghGroup = document.getElementById('grp-github-sync');
-  const ipGroup = document.getElementById('grp-esp-ip');
+// 11. Real-Time ESP32 Synchronization & Telemetry Engine
 
-  if (btnDemo) btnDemo.className = `pill-btn ${mode === 'demo' ? 'active' : ''}`;
-  if (btnGithub) btnGithub.className = `pill-btn ${mode === 'github' ? 'active' : ''}`;
-  if (btnLive) btnLive.className = `pill-btn ${mode === 'live' ? 'active' : ''}`;
+// Central Telemetry Dispatcher: updates sensors & evaluates AI without overwriting user's selected produce
+function applyIncomingTelemetry(data, source = 'wifi') {
+  if (data.temperature !== undefined) state.temperature = Number(data.temperature);
+  if (data.humidity !== undefined) state.humidity = Number(data.humidity);
+  if (data.pressure !== undefined) state.pressure = Number(data.pressure);
+  if (data.storageDays !== undefined && !state.userSelectedProduce) {
+    state.storageDays = Number(data.storageDays);
+  }
 
-  if (mode === 'github') {
-    if (ghGroup) ghGroup.style.display = 'flex';
-    if (ipGroup) ipGroup.style.display = 'none';
-    stopLivePolling();
-    startGithubPolling();
-  } else if (mode === 'live') {
-    if (ghGroup) ghGroup.style.display = 'none';
-    if (ipGroup) ipGroup.style.display = 'flex';
-    stopGithubPolling();
-    startLivePolling();
-  } else {
-    // Demo Mode
-    if (ghGroup) ghGroup.style.display = 'none';
-    if (ipGroup) ipGroup.style.display = 'none';
-    stopGithubPolling();
-    stopLivePolling();
-    const sensorStatusEl = document.getElementById('txt-sensor-status');
-    if (sensorStatusEl) {
-      sensorStatusEl.textContent = 'Interactive Demo Active';
-      sensorStatusEl.style.color = '#38bdf8';
+  // Only initialize produce from hardware if user hasn't explicitly clicked one
+  if (data.produceId && !state.userSelectedProduce) {
+    state.selectedProduceId = data.produceId;
+  }
+
+  // Sync range slider inputs to real readings
+  const sT = document.getElementById('slider-temp');
+  const sH = document.getElementById('slider-hum');
+  const sD = document.getElementById('slider-days');
+  if (sT) sT.value = state.temperature;
+  if (sH) sH.value = state.humidity;
+  if (sD) sD.value = state.storageDays;
+
+  updateConnectionBadge(source, true);
+
+  renderProduceCards();
+  updateDashboard();
+}
+
+// Update Top Navbar Connection Badge and Control Status
+function updateConnectionBadge(type, isConnected, extraText = '') {
+  const badge = document.getElementById('connection-badge');
+  const dot = document.getElementById('nav-sync-dot');
+  const txt = document.getElementById('txt-sync-status');
+  const pingStatus = document.getElementById('esp-ping-status');
+  const sensorStatus = document.getElementById('txt-sensor-status');
+
+  if (!badge || !dot || !txt) return;
+
+  badge.className = 'connection-badge';
+
+  if (type === 'usb' && isConnected) {
+    badge.classList.add('connected-usb');
+    dot.className = 'indicator-dot dot-usb';
+    txt.textContent = 'ESP32 Live (USB)';
+    if (pingStatus) pingStatus.textContent = 'USB Serial Connected (115200)';
+    if (sensorStatus) {
+      sensorStatus.textContent = 'ESP32-S3 Hardware Online (USB)';
+      sensorStatus.style.color = '#38bdf8';
     }
+  } else if (type === 'wifi' && isConnected) {
+    dot.className = 'indicator-dot dot-live';
+    txt.textContent = `ESP32 Live (${state.espIp})`;
+    if (pingStatus) pingStatus.textContent = `Wi-Fi Connected (${state.espIp})`;
+    if (sensorStatus) {
+      sensorStatus.textContent = `ESP32-S3 Hardware Online (${state.espIp})`;
+      sensorStatus.style.color = '#10b981';
+    }
+  } else if (type === 'cloud' && isConnected) {
+    badge.classList.add('connected-cloud');
+    dot.className = 'indicator-dot dot-cloud';
+    txt.textContent = 'Cloud Synced';
+    if (pingStatus) pingStatus.textContent = 'GitHub Telemetry Synced';
+    if (sensorStatus) {
+      sensorStatus.textContent = 'GitHub Cloud Synced';
+      sensorStatus.style.color = '#a855f7';
+    }
+  } else {
+    badge.classList.add('searching');
+    dot.className = 'indicator-dot dot-searching';
+    txt.textContent = isConnected ? 'ESP32 Active' : (extraText || 'Searching ESP32...');
+    if (pingStatus && !isConnected) pingStatus.textContent = extraText || 'Searching ESP32...';
   }
 }
 
-// GitHub Cloud Internet Sync Functions
-function startGithubPolling() {
-  stopGithubPolling();
-  pollGithubTelemetry();
-  state.githubPollingTimer = setInterval(pollGithubTelemetry, 15000); // Poll every 15s
-}
-
-function stopGithubPolling() {
-  if (state.githubPollingTimer) {
-    clearInterval(state.githubPollingTimer);
-    state.githubPollingTimer = null;
-  }
-}
-
-function syncFromGithubNow() {
-  const userInput = document.getElementById('input-gh-user');
-  const repoInput = document.getElementById('input-gh-repo');
-  if (userInput && userInput.value.trim()) state.githubUser = userInput.value.trim();
-  if (repoInput && repoInput.value.trim()) state.githubRepo = repoInput.value.trim();
-  pollGithubTelemetry(true);
-}
-
-function pollGithubTelemetry(force = false) {
-  const statusEl = document.getElementById('gh-sync-status');
-  if (statusEl) {
-    statusEl.textContent = 'Syncing...';
-    statusEl.style.color = '#a855f7';
-  }
-
-  const rawUrl = `https://raw.githubusercontent.com/${state.githubUser}/${state.githubRepo}/${state.githubBranch}/${state.githubPath}?t=${Date.now()}`;
-
-  fetch(rawUrl, { cache: 'no-store' })
-    .then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      if (statusEl) {
-        statusEl.textContent = `Synced (${timeStr})`;
-        statusEl.style.color = '#10b981';
-      }
-
-      if (data.temperature !== undefined) state.temperature = Number(data.temperature);
-      if (data.humidity !== undefined) state.humidity = Number(data.humidity);
-      if (data.storageDays !== undefined) state.storageDays = Number(data.storageDays);
-      if (data.produceId) state.selectedProduceId = data.produceId;
-
-      // Update slider positions
-      const sT = document.getElementById('slider-temp');
-      const sH = document.getElementById('slider-hum');
-      const sD = document.getElementById('slider-days');
-      if (sT) sT.value = state.temperature;
-      if (sH) sH.value = state.humidity;
-      if (sD) sD.value = state.storageDays;
-
-      // Update header sensor badge
-      const sensorStatusEl = document.getElementById('txt-sensor-status');
-      if (sensorStatusEl) {
-        sensorStatusEl.textContent = `GitHub Cloud • ${data.deviceOnline ? 'Online' : 'Synced'} (${state.githubUser})`;
-        sensorStatusEl.style.color = '#a855f7';
-      }
-
-      renderProduceCards();
-      updateDashboard();
-    })
-    .catch(err => {
-      if (statusEl) {
-        statusEl.textContent = 'Repo File Not Found (Check Repo/Branch)';
-        statusEl.style.color = '#f59e0b';
-      }
-    });
-}
-
+// Direct Wi-Fi / SoftAP Polling
 function startLivePolling() {
   stopLivePolling();
   pollEsp32Status();
-  state.livePollingTimer = setInterval(pollEsp32Status, 2500);
+  state.livePollingTimer = setInterval(pollEsp32Status, 2000);
 }
 
 function stopLivePolling() {
@@ -918,49 +889,169 @@ function stopLivePolling() {
 
 function testEsp32Connection() {
   const ipInput = document.getElementById('input-esp-ip');
-  if (ipInput) state.espIp = ipInput.value.trim();
+  if (ipInput && ipInput.value.trim()) {
+    state.espIp = ipInput.value.trim();
+  }
+  const pingStatus = document.getElementById('esp-ping-status');
+  if (pingStatus) pingStatus.textContent = `Connecting to ${state.espIp}...`;
   pollEsp32Status();
 }
 
 function pollEsp32Status() {
-  const statusEl = document.getElementById('esp-ping-status');
-  if (!statusEl) return;
+  // If USB is actively connected, skip HTTP polling to avoid conflict
+  if (state.serialPort) return;
 
-  statusEl.textContent = 'Polling...';
-  statusEl.style.color = '#38bdf8';
+  const pingStatus = document.getElementById('esp-ping-status');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-  fetch(`http://${state.espIp}/api/status`, { cache: 'no-store' })
-    .then(res => res.json())
+  fetch(`http://${state.espIp}/api/status`, { cache: 'no-store', signal: controller.signal })
+    .then(res => {
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
     .then(data => {
-      statusEl.textContent = 'Connected (200 OK)';
-      statusEl.style.color = '#10b981';
-
-      if (data.temperature !== undefined) state.temperature = data.temperature;
-      if (data.humidity !== undefined) state.humidity = data.humidity;
-      if (data.storageDays !== undefined) state.storageDays = data.storageDays;
-      if (data.produceId) state.selectedProduceId = data.produceId;
-
-      // Update slider positions
-      const sT = document.getElementById('slider-temp');
-      const sH = document.getElementById('slider-hum');
-      const sD = document.getElementById('slider-days');
-      if (sT) sT.value = state.temperature;
-      if (sH) sH.value = state.humidity;
-      if (sD) sD.value = state.storageDays;
-
-      const sensorStatusEl = document.getElementById('txt-sensor-status');
-      if (sensorStatusEl) {
-        sensorStatusEl.textContent = 'ESP32-S3 Hardware Online (AP)';
-        sensorStatusEl.style.color = '#10b981';
-      }
-
-      renderProduceCards();
-      updateDashboard();
+      applyIncomingTelemetry(data, 'wifi');
     })
     .catch(err => {
-      statusEl.textContent = 'Offline (Check AP / IP)';
-      statusEl.style.color = '#f59e0b';
+      clearTimeout(timeoutId);
+      if (window.location.protocol === 'https:') {
+        // Modern browsers block http:// from https:// (Mixed Content)
+        if (pingStatus) {
+          pingStatus.textContent = 'HTTPS blocks local IP — use "Connect USB Cable" or open dashboard locally';
+        }
+        updateConnectionBadge('searching', false, 'Use USB or Local');
+      } else {
+        if (pingStatus) pingStatus.textContent = `ESP32 at ${state.espIp} unreachable`;
+      }
     });
+}
+
+// GitHub Cloud Internet Sync
+function pollGithubTelemetry(force = false) {
+  const pingStatus = document.getElementById('esp-ping-status');
+  if (pingStatus && force) pingStatus.textContent = 'Cloud Syncing...';
+
+  const rawUrl = `https://raw.githubusercontent.com/${state.githubUser}/${state.githubRepo}/${state.githubBranch}/${state.githubPath}?t=${Date.now()}`;
+
+  fetch(rawUrl, { cache: 'no-store' })
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(data => {
+      applyIncomingTelemetry(data, 'cloud');
+    })
+    .catch(err => {
+      if (pingStatus && force) {
+        pingStatus.textContent = 'Cloud file not found (Check Repo)';
+      }
+    });
+}
+
+// WebSerial Direct USB Support (Works on GitHub Pages HTTPS & Offline)
+async function connectUsbSerial() {
+  if (!navigator.serial) {
+    alert('WebSerial is supported on Google Chrome, Microsoft Edge, and Chromium-based browsers on PC/Mac.');
+    return;
+  }
+
+  try {
+    if (state.serialPort) {
+      await disconnectUsbSerial();
+      return;
+    }
+
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    state.serialPort = port;
+
+    const btnUsb = document.getElementById('btn-usb-serial');
+    if (btnUsb) {
+      btnUsb.classList.add('active');
+      btnUsb.innerHTML = '<span class="usb-icon">🔌</span><span>Disconnect USB</span>';
+    }
+
+    updateConnectionBadge('usb', true);
+    stopLivePolling(); // USB gives direct stream, pause HTTP polling
+
+    // Start listening for telemetry lines from ESP32
+    readSerialStream(port);
+  } catch (err) {
+    console.warn('WebSerial connection cancelled or failed:', err);
+    updateConnectionBadge('searching', false, 'USB Not Connected');
+  }
+}
+
+async function disconnectUsbSerial() {
+  try {
+    if (state.serialReader) {
+      await state.serialReader.cancel();
+      state.serialReader = null;
+    }
+    if (state.serialPort) {
+      await state.serialPort.close();
+      state.serialPort = null;
+    }
+  } catch (e) {
+    console.warn('USB disconnect:', e);
+  }
+  const btnUsb = document.getElementById('btn-usb-serial');
+  if (btnUsb) {
+    btnUsb.classList.remove('active');
+    btnUsb.innerHTML = '<span class="usb-icon">🔌</span><span>Connect USB Cable</span>';
+  }
+  startLivePolling();
+}
+
+async function sendSerialCommand(cmd) {
+  if (!state.serialPort || !state.serialPort.writable) return;
+  try {
+    const encoder = new TextEncoder();
+    const writer = state.serialPort.writable.getWriter();
+    await writer.write(encoder.encode(cmd));
+    writer.releaseLock();
+  } catch (e) {
+    console.warn('Serial write error:', e);
+  }
+}
+
+async function readSerialStream(port) {
+  const textDecoder = new TextDecoderStream();
+  port.readable.pipeTo(textDecoder.writable).catch(() => {});
+  const reader = textDecoder.readable.getReader();
+  state.serialReader = reader;
+
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        buffer += value;
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Retain incomplete line for next chunk
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('TELEMETRY:')) {
+            try {
+              const jsonStr = trimmed.substring(10);
+              const data = JSON.parse(jsonStr);
+              applyIncomingTelemetry(data, 'usb');
+            } catch (jsonErr) {
+              console.warn('Serial JSON parse error:', jsonErr);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Serial stream terminated:', err);
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 // 12. Micro-Climate Trend Chart (Native Responsive HTML5 Canvas)
@@ -1084,6 +1175,13 @@ window.addEventListener('resize', () => {
 
 // 14. Initial Bootstrap
 document.addEventListener('DOMContentLoaded', () => {
+  // If opened directly from ESP32 IP or local network
+  if (window.location.hostname && window.location.hostname !== 'localhost' && !window.location.hostname.endsWith('github.io')) {
+    state.espIp = window.location.hostname;
+    const ipInput = document.getElementById('input-esp-ip');
+    if (ipInput) ipInput.value = state.espIp;
+  }
+
   // Auto-detect GitHub Pages URL and repository details
   if (window.location.hostname.endsWith('github.io')) {
     const domainParts = window.location.hostname.split('.');
@@ -1094,16 +1192,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (pathSegments.length > 0 && pathSegments[0] !== 'dashboard') {
       state.githubRepo = pathSegments[0];
     }
-    const uInput = document.getElementById('input-gh-user');
-    const rInput = document.getElementById('input-gh-repo');
-    if (uInput) uInput.value = state.githubUser;
-    if (rInput) rInput.value = state.githubRepo;
-
-    // Automatically switch to GitHub Cloud Sync mode when running on GitHub Pages
-    setConnectionMode('github');
+    // Attempt initial cloud sync fetch
+    pollGithubTelemetry(false);
   }
 
   initHistoryData();
   renderProduceCards();
   updateDashboard();
+
+  // Start polling ESP32 directly via Wi-Fi AP / LAN
+  startLivePolling();
 });

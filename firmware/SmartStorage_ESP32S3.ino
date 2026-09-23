@@ -466,6 +466,10 @@ void handleApiSetProduce() {
         currentHumidity = server.arg("humidity").toFloat();
     }
 
+    lastOledUpdate = 0; // Trigger immediate OLED redraw
+    Serial.print("[HTTP] Produce switched to: ");
+    Serial.println(riskAI.getProduceName(currentProduce));
+
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
@@ -621,9 +625,61 @@ void setup() {
     Serial.println("[HTTP] Web Server Started. REST Endpoints Active.");
 }
 
+// WebSerial and USB Telemetry stream (1-second interval)
+unsigned long lastSerialTelemetry = 0;
+
+void handleSerialCommunication() {
+    unsigned long now = millis();
+    
+    // 1. Output clean JSON telemetry stream every 1000ms for WebSerial / PC Dashboard
+    if (now - lastSerialTelemetry >= 1000) {
+        lastSerialTelemetry = now;
+        StorageAssessment eval = riskAI.evaluate(currentProduce, currentTemperature, currentHumidity, storagePeriodDays);
+        const ProduceProfile& prof = riskAI.getProfile(currentProduce);
+
+        Serial.print("TELEMETRY:{");
+        Serial.print("\"produceId\":\""); Serial.print(prof.id); Serial.print("\",");
+        Serial.print("\"produceName\":\""); Serial.print(prof.name); Serial.print("\",");
+        Serial.print("\"produceHindi\":\""); Serial.print(prof.hindiName); Serial.print("\",");
+        Serial.print("\"produceIcon\":\""); Serial.print(prof.icon); Serial.print("\",");
+        Serial.print("\"temperature\":"); Serial.print(eval.temperature, 1); Serial.print(",");
+        Serial.print("\"humidity\":"); Serial.print(eval.humidity, 1); Serial.print(",");
+        Serial.print("\"pressure\":"); Serial.print(currentPressure, 1); Serial.print(",");
+        Serial.print("\"dewPoint\":"); Serial.print(eval.dewPoint, 1); Serial.print(",");
+        Serial.print("\"storageDays\":"); Serial.print(eval.storageDays); Serial.print(",");
+        Serial.print("\"riskLevel\":"); Serial.print((int)eval.riskLevel); Serial.print(",");
+        Serial.print("\"riskLevelText\":\""); Serial.print(eval.statusText); Serial.print("\",");
+        Serial.print("\"riskScore\":"); Serial.print(eval.riskScore, 1); Serial.print(",");
+        Serial.print("\"primaryAction\":\""); Serial.print(eval.primaryAction); Serial.print("\",");
+        Serial.print("\"safeTempMax\":"); Serial.print(prof.safeTempMax, 1); Serial.print(",");
+        Serial.print("\"safeHumidityMax\":"); Serial.print(prof.safeHumidityMax, 1); Serial.print(",");
+        Serial.print("\"bmp280Detected\":"); Serial.print(isBmpDetected ? "true" : "false"); Serial.print(",");
+        Serial.print("\"dht11Detected\":"); Serial.print(isDhtDetected ? "true" : "false"); Serial.print(",");
+        Serial.print("\"deviceOnline\":true");
+        Serial.println("}");
+    }
+
+    // 2. Process incoming commands from WebSerial or Serial Monitor
+    if (Serial.available() > 0) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.startsWith("SET_PRODUCE:")) {
+            String pName = cmd.substring(12);
+            currentProduce = riskAI.parseProduce(pName);
+            lastOledUpdate = 0; // Trigger OLED redraw immediately
+            Serial.print("[CMD] Produce switched to: ");
+            Serial.println(riskAI.getProduceName(currentProduce));
+        } else if (cmd.startsWith("SET_DAYS:")) {
+            storagePeriodDays = cmd.substring(9).toInt();
+            lastOledUpdate = 0;
+        }
+    }
+}
+
 void loop() {
     server.handleClient();
     updateSensorReadings();
+    handleSerialCommunication();
     recordHistory();
     syncTelemetryToGitHub();
     

@@ -29,20 +29,10 @@
     </div>
 
     <div class="nav-controls">
-      <!-- Mode Toggle: Demo / GitHub Cloud / Live ESP32 -->
-      <div class="mode-pill" id="mode-selector">
-        <button class="pill-btn active" id="btn-mode-demo" onclick="setConnectionMode('demo')">
-          <span class="indicator-dot dot-demo"></span>
-          <span id="txt-demo-mode">Interactive Demo</span>
-        </button>
-        <button class="pill-btn" id="btn-mode-github" onclick="setConnectionMode('github')">
-          <span class="indicator-dot dot-github"></span>
-          <span id="txt-github-mode">GitHub Cloud Sync</span>
-        </button>
-        <button class="pill-btn" id="btn-mode-live" onclick="setConnectionMode('live')">
-          <span class="indicator-dot dot-live"></span>
-          <span id="txt-live-mode">ESP32 Local AP</span>
-        </button>
+      <!-- Device Connection Status Badge -->
+      <div class="connection-badge" id="connection-badge" title="ESP32 Link Status">
+        <span class="indicator-dot dot-live" id="nav-sync-dot"></span>
+        <span id="txt-sync-status">ESP32 Live</span>
       </div>
 
       <!-- Language Selector -->
@@ -324,31 +314,27 @@
           <input type="range" id="slider-days" min="1" max="180" step="1" value="12" oninput="onSensorSliderChange()">
         </div>
 
-        <!-- GitHub Cloud Internet Sync Config -->
-        <div class="control-group" id="grp-github-sync" style="display: none;">
+        <!-- ESP32 Device Connection & Real-Time Sync -->
+        <div class="control-group connection-control-box" id="grp-device-connection">
           <div class="control-label-row">
-            <label for="input-gh-user" id="lbl-ctrl-gh">GitHub Internet Sync</label>
-            <span class="ip-status" id="gh-sync-status">Ready</span>
+            <label for="input-esp-ip" id="lbl-ctrl-ip">ESP32 Device Link & Live Sync</label>
+            <span class="ip-status" id="esp-ping-status">Searching ESP32...</span>
           </div>
-          <div class="gh-sync-row">
-            <input type="text" id="input-gh-user" value="rudrapratapkarmakarpzs-alt" placeholder="User">
-            <input type="text" id="input-gh-repo" value="IOT-Based-Smart-Storage-and-Quality-Protection-System" placeholder="Repo">
-            <button class="sync-btn" style="background: #a855f7; color: #fff;" onclick="pollGithubTelemetry(true)" id="btn-sync-gh">Sync</button>
+          <div class="connection-actions-row">
+            <div class="ip-input-row">
+              <input type="text" id="input-esp-ip" value="192.168.4.1" placeholder="ESP32 IP (e.g. 192.168.4.1)" title="Enter ESP32 IP or mDNS hostname">
+              <button class="sync-btn btn-wifi-connect" onclick="testEsp32Connection()" id="btn-connect-esp">Connect Wi-Fi</button>
+            </div>
+            <button class="usb-serial-btn" id="btn-usb-serial" onclick="connectUsbSerial()" title="Direct USB cable connection (Works on GitHub Pages & Offline)">
+              <span class="usb-icon">🔌</span>
+              <span id="txt-usb-btn">Connect USB Cable</span>
+            </button>
+            <button class="cloud-sync-btn" id="btn-sync-gh" onclick="pollGithubTelemetry(true)" title="Sync telemetry from GitHub Cloud repository">
+              <span id="txt-cloud-btn">☁️ Cloud Sync</span>
+            </button>
           </div>
-          <div class="gh-hint" id="gh-hint-text">
-            Reads live telemetry pushed by ESP32-S3 to <code>data/telemetry.json</code> over the Internet.
-          </div>
-        </div>
-
-        <!-- ESP32 Hardware IP Config (For Direct Local AP Mode) -->
-        <div class="control-group" id="grp-esp-ip" style="display: none;">
-          <div class="control-label-row">
-            <label for="input-esp-ip" id="lbl-ctrl-ip">ESP32-S3 Local AP IP</label>
-            <span class="ip-status" id="esp-ping-status">Ready</span>
-          </div>
-          <div class="ip-input-row">
-            <input type="text" id="input-esp-ip" value="192.168.4.1" placeholder="192.168.4.1">
-            <button class="sync-btn" onclick="testEsp32Connection()" id="btn-connect-esp">Connect</button>
+          <div class="connection-hint" id="connection-hint-text">
+            <span>💡 <strong>Quick Link:</strong> Connect your PC/phone to Wi-Fi <code>SmartStorage-ESP32S3</code> (IP <code>192.168.4.1</code>) or plug in via USB cable for direct 1-second live telemetry.</span>
           </div>
         </div>
       </div>
