@@ -251,8 +251,8 @@ const state = {
   currentLanguage: 'en',
   connectionMode: 'demo', // 'demo', 'github', or 'live'
   espIp: '192.168.4.1',
-  githubUser: 'Rudrapratap',
-  githubRepo: 'smart-storage-iot-esp32s3',
+  githubUser: 'rudrapratapkarmakarpzs-alt',
+  githubRepo: 'IOT-Based-Smart-Storage-and-Quality-Protection-System',
   githubBranch: 'main',
   githubPath: 'data/telemetry.json',
   selectedProduceId: 'mahua',

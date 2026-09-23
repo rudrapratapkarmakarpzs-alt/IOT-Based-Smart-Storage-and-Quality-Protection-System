@@ -17,8 +17,8 @@
 
 // 3. GitHub Account Integration
 // The ESP32-S3 pushes live telemetry to your GitHub repository or Gist via HTTPS
-#define GITHUB_USERNAME     "Rudrapratap"
-#define GITHUB_REPO         "smart-storage-iot-esp32s3"
+#define GITHUB_USERNAME     "rudrapratapkarmakarpzs-alt"
+#define GITHUB_REPO         "IOT-Based-Smart-Storage-and-Quality-Protection-System"
 #define GITHUB_BRANCH       "main"
 // GitHub Personal Access Token (PAT) with "repo" or "gist" permission
 // Generate at: https://github.com/settings/tokens (classic) or fine-grained tokens
